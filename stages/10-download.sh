@@ -66,9 +66,9 @@ ok "Kernel source ready at $KERNEL_DIR"
 if [ "${VIRTUAL_A55_POLICY_SPLIT:-y}" = "y" ]; then
     PATCH_SCRIPT="$ROOT_DIR/kernel/patches/apply_virtual_a55_policy_split.py"
     if [ -f "$PATCH_SCRIPT" ]; then
-        log "Applying MT6789 peak 3+3+2 logical cpufreq policy split..."
+        log "Applying MT6789 dual-domain unified 16-state cpufreq table..."
         python3 "$PATCH_SCRIPT" "$KERNEL_DIR/drivers/cpufreq/mediatek-cpufreq-hw.c"
-        ok "Peak logical policy split applied: CPU0-2 + CPU3-5 share the stock A55 hardware domain; CPU6-7 remain native A76."
+        ok "Unified 16-state table applied: CPU0-5 remain one A55 policy; CPU6-7 remain one A76 policy."
     else
         error "Virtual A55 policy split script missing: $PATCH_SCRIPT"
     fi

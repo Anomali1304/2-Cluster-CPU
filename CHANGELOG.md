@@ -39,3 +39,10 @@ ReSukiSU), and addons all in one place.
 - Every module, every run: vendor MTK + in-tree GKI + addon `.ko` files all zipped together.
 - One config file: every knob in `config/defaults.env`.
 - CI-native: single GitHub Actions `workflow_dispatch`, every knob exposed as an input.
+
+## 7.1-fixed-16state
+- Fixed the unified A55/A76 cpufreq table to the actual 16-state A76 sequence.
+- Restored the missing 1000 MHz entry at logical index 12.
+- Canonicalized both physical policies against the same ordered 16-entry table.
+- Kept the stock two physical performance domains and dynamic DVFS.
+- Did not disable thermal/cpufreq cooling constraints; a runtime `scaling_max_freq` cap below `cpuinfo_max_freq` is a separate policy constraint and must not be masked in the driver.

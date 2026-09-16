@@ -7,9 +7,10 @@
  *   Domain 1: CPU6-7 (A76)
  *
  * The A76 domain keeps its hardware LUT unchanged. The A55 domain is programmed
- * at probe time with the same 15 frequency points (725-2200 MHz) by replacing
- * the frequency field of its hardware LUT rows. The cpufreq table then maps
- * directly to those real A55 hardware states. DVFS remains dynamic.
+ * at probe time with the exact same 16 frequency points (725-2200 MHz), including
+ * the 1000 MHz state, by replacing the frequency field of its hardware LUT rows.
+ * Both cpufreq policies expose the same ordered frequency table, so one logical
+ * index always means the same frequency on both physical domains. DVFS remains dynamic.
  *
  * This does NOT turn A55 cores into A76 cores; it gives the A55 clock controller
  * the same frequency points used by the A76 domain.
@@ -79,14 +80,15 @@ static bool mtk_is_a55_domain(const struct cpufreq_mtk *c)
 }
 
 /*
- * The A55 controller is programmed with the same 15 frequency points as the
+ * The A55 controller is programmed with the same 16 frequency points as the
  * native A76 controller.  These are real hardware LUT values, not merely
  * labels exposed through cpufreq.
  */
 static const unsigned int mtk_a76_scale_khz[] = {
 	2200000U, 2100000U, 2000000U, 1900000U, 1800000U,
 	1700000U, 1600000U, 1500000U, 1400000U, 1300000U,
-	1200000U, 1100000U,  900000U,  800000U,  725000U,
+	1200000U, 1100000U, 1000000U,  900000U,  800000U,
+	 725000U,
 };
 
 #define MTK_A76_SCALE_ENTRIES ARRAY_SIZE(mtk_a76_scale_khz)
@@ -94,8 +96,8 @@ static const unsigned int mtk_a76_scale_khz[] = {
 /*
  * Replace the top A55 hardware LUT states before cpufreq enables the HW.
  * Only the frequency field is changed; all other controller bits remain
- * untouched.  Row 15 duplicates row 14 so the normal LUT reader terminates
- * after exactly the 15 A76-compatible states.
+ * untouched.  Row 16 duplicates row 15 so the normal LUT reader terminates
+ * after exactly the 16 A76-compatible states.
  */
 static int mtk_program_a55_a76_lut(struct cpufreq_mtk *c)
 {
@@ -306,18 +308,20 @@ static int mtk_cpu_create_freq_table(struct platform_device *pdev,
 	if (!c->table)
 		return -ENOMEM;
 
-	if (!mtk_is_a55_domain(c)) {
-		for (i = 0; i < c->hw_nr_opp; i++)
-			c->table[i].frequency = c->hw_table[i].frequency;
-		c->nr_opp = c->hw_nr_opp;
-	} else {
-		/* A55 hardware LUT was replaced with the exact A76 15-state scale. */
-		if (c->hw_nr_opp != MTK_A76_SCALE_ENTRIES)
+	/*
+	 * The two physical domains must expose one identical logical table.
+	 * A76 is expected to already contain this native 16-state sequence;
+	 * A55 was programmed above to contain the same sequence.
+	 */
+	if (c->hw_nr_opp != MTK_A76_SCALE_ENTRIES)
+		return -EINVAL;
+
+	for (i = 0; i < MTK_A76_SCALE_ENTRIES; i++) {
+		if (c->hw_table[i].frequency != mtk_a76_scale_khz[i])
 			return -EINVAL;
-		for (i = 0; i < MTK_A76_SCALE_ENTRIES; i++)
-			c->table[i].frequency = mtk_a76_scale_khz[i];
-		c->nr_opp = MTK_A76_SCALE_ENTRIES;
+		c->table[i].frequency = mtk_a76_scale_khz[i];
 	}
+	c->nr_opp = MTK_A76_SCALE_ENTRIES;
 
 	c->table[c->nr_opp].frequency = CPUFREQ_TABLE_END;
 	return 0;
