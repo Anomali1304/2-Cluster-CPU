@@ -98,7 +98,8 @@ static unsigned int mtk_a55_to_logical(unsigned int hw_khz,
 	return LOGICAL_MIN_KHZ + div_u64(num, hw_max - hw_min);
 }
 
-static unsigned int mtk_logical_to_a55_index(const struct cpufreq_mtk *c,
+static unsigned int __maybe_unused
+mtk_logical_to_a55_index(const struct cpufreq_mtk *c,
 						unsigned int target_khz)
 {
 	unsigned int i, best = 0;
