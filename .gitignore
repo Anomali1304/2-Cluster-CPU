@@ -1,0 +1,4 @@
+/workspace/
+/release-out/
+*.log
+.DS_Store

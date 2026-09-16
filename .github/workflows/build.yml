@@ -1,0 +1,200 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Run mode"
+        type: choice
+        options: ["Full Run", "Dry Run"]
+        default: "Full Run"
+
+      clang_vendor:
+        description: "Clang toolchain"
+        type: choice
+        options: ["GKI", "ZyC", "Custom"]
+        default: "GKI"
+      clang_custom_url:
+        description: "Clang Vendor=Custom only — tar.gz/tar.zst/tar.xz URL to download"
+        type: string
+        default: ""
+
+      root_type:
+        description: "Root solution"
+        type: choice
+        options: ["VANILLA", "RESUKISU", "KSUN"]
+        default: "VANILLA"
+      lto_mode:
+        description: "LTO mode"
+        type: choice
+        options: ["THIN", "FULL", "NONE"]
+        default: "THIN"
+      enable_ext_modules:
+        description: "Build vendor MTK modules (EXT_MODULES)"
+        type: boolean
+        default: true
+
+      addons:
+        description: "Comma-separated addons to build (e.g. overclock_mt6789) — blank = none"
+        type: string
+        default: ""
+      modules_filter:
+        description: "Substring filter for the all-modules zip (blank = every .ko)"
+        type: string
+        default: ""
+
+      kernel_branch:
+        description: "Override kernel branch (blank = repo default)"
+        type: string
+        default: ""
+      kernel_name:
+        description: "LOCALVERSION suffix"
+        type: string
+        default: "RockKernel"
+      zip_prefix:
+        description: "Output zip filename prefix"
+        type: string
+        default: "Rock-Kernel"
+
+      publish_release:
+        description: "Publish the flashable kernel zip to GitHub Releases"
+        type: boolean
+        default: true
+      cache_workspace:
+        description: "Cache safe repo metadata and toolchains to speed up later runs with the same config"
+        type: boolean
+        default: true
+
+concurrency:
+  group: Rock_Project-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write   # needed by softprops/action-gh-release below
+
+    env:
+      RUN_MODE: ${{ inputs.run_mode }}
+      CLANG_VENDOR: ${{ inputs.clang_vendor }}
+      CLANG_CUSTOM_URL: ${{ inputs.clang_custom_url }}
+      ROOT_TYPE: ${{ inputs.root_type }}
+      LTO_MODE: ${{ inputs.lto_mode }}
+      USE_EXT_MODULES: ${{ inputs.enable_ext_modules && 'y' || 'n' }}
+      ADDONS: ${{ inputs.addons }}
+      MODULES_FILTER: ${{ inputs.modules_filter }}
+      KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+      KERNEL_NAME: ${{ inputs.kernel_name }}
+      ZIP_PREFIX: ${{ inputs.zip_prefix }}
+
+    steps:
+      - name: Checkout Rock_Project
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          sudo docker image prune -af || true
+          df -h
+
+      - name: Compute cache key
+        id: cache_key
+        env:
+          CACHE_LAYOUT: v3-no-common-worktree
+          KERNEL_BRANCH_INPUT: ${{ inputs.kernel_branch }}
+          ROOT_TYPE_INPUT: ${{ inputs.root_type }}
+          LTO_MODE_INPUT: ${{ inputs.lto_mode }}
+        run: |
+          export KERNEL_BRANCH="$KERNEL_BRANCH_INPUT"
+          export ROOT_TYPE="$ROOT_TYPE_INPUT"
+          export LTO_MODE="$LTO_MODE_INPUT"
+          source config/defaults.env
+          source lib/functions.sh
+          FP="$(build_fingerprint)"
+          CFG_HASH="$(sha256sum .github/workflows/build.yml stages/10-download.sh lib/functions.sh config/defaults.env | sha256sum | cut -c1-16)"
+          echo "key=rock-workspace-v3-$(printf '%s|%s|%s' "$FP" "$CACHE_LAYOUT" "$CFG_HASH" | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore workspace
+        if: inputs.cache_workspace
+        id: restore_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            workspace/.repo
+            workspace/prebuilts
+            workspace/clang-zyc
+            workspace/clang-custom
+          key: ${{ steps.cache_key.outputs.key }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ steps.cache_key.outputs.key }}-
+
+      - name: Run build
+        run: bash build.sh
+
+      - name: Save workspace
+        if: always() && inputs.cache_workspace && success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            workspace/.repo
+            workspace/prebuilts
+            workspace/clang-zyc
+            workspace/clang-custom
+          key: ${{ steps.cache_key.outputs.key }}-${{ github.run_id }}
+
+      - name: Upload flashable kernel
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rock-kernel-${{ github.run_number }}
+          path: |
+            release-out/${{ inputs.zip_prefix }}*.zip
+            !release-out/${{ inputs.zip_prefix }}*-addons.zip
+            !release-out/${{ inputs.zip_prefix }}*-modules.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload addon modules
+        if: always() && inputs.addons != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: rock-kernel-addons-${{ github.run_number }}
+          path: release-out/${{ inputs.zip_prefix }}*-addons.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload all modules
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rock-kernel-modules-${{ github.run_number }}
+          path: release-out/${{ inputs.zip_prefix }}*-modules.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ github.run_number }}
+          path: workspace/build.log
+          if-no-files-found: ignore
+
+      - name: Locate flashable zip
+        id: flashable
+        if: success() && inputs.run_mode == 'Full Run' && inputs.publish_release == true
+        run: |
+          source lib/functions.sh
+          FLASHABLE_ZIP="release-out/${ZIP_PREFIX}$(get_root_suffix).zip"
+          [ -f "$FLASHABLE_ZIP" ] || { echo "::error::Flashable zip not found: $FLASHABLE_ZIP"; exit 1; }
+          echo "path=${FLASHABLE_ZIP}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: success() && inputs.run_mode == 'Full Run' && inputs.publish_release == true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.kernel_name }}-${{ inputs.root_type }}-${{ github.run_number }}
+          name: ${{ inputs.kernel_name }}-${{ inputs.root_type }} #${{ github.run_number }}
+          files: ${{ steps.flashable.outputs.path }}
