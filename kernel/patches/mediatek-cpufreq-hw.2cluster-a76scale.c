@@ -6,13 +6,13 @@
  *   Domain 0: CPU0-5 (A55)
  *   Domain 1: CPU6-7 (A76)
  *
- * The A76 domain keeps its hardware LUT unchanged. The A55 domain keeps its
- * hardware LUT entries unchanged, but exposes those states on the same
- * logical 725-2200 MHz scale. A request is always converted back to the
- * native LUT index before touching hardware.
+ * The A76 domain keeps its hardware LUT unchanged. The A55 domain is programmed
+ * at probe time with the same 15 frequency points (725-2200 MHz) by replacing
+ * the frequency field of its hardware LUT rows. The cpufreq table then maps
+ * directly to those real A55 hardware states. DVFS remains dynamic.
  *
- * This does NOT turn A55 cores into A76 cores and does not write an A76 LUT
- * index into the A55 controller.
+ * This does NOT turn A55 cores into A76 cores; it gives the A55 clock controller
+ * the same frequency points used by the A76 domain.
  */
 #include <linux/bitfield.h>
 #include <linux/cpufreq.h>
@@ -33,8 +33,6 @@
 #define SVS_HW_STATUS BIT(1)
 #define POLL_USEC 1000
 #define TIMEOUT_USEC 300000
-#define LOGICAL_MIN_KHZ 725000U
-#define LOGICAL_MAX_KHZ 2200000U
 
 enum {
 	REG_FREQ_LUT_TABLE,
@@ -80,37 +78,50 @@ static bool mtk_is_a55_domain(const struct cpufreq_mtk *c)
 	return cpumask_test_cpu(0, &c->related_cpus);
 }
 
-/* Map a native hardware frequency onto the common 725-2200 logical scale. */
-static unsigned int mtk_a55_to_logical(unsigned int hw_khz,
-					unsigned int hw_min, unsigned int hw_max)
+/*
+ * The A55 controller is programmed with the same 15 frequency points as the
+ * native A76 controller.  These are real hardware LUT values, not merely
+ * labels exposed through cpufreq.
+ */
+static const unsigned int mtk_a76_scale_khz[] = {
+	2200000U, 2100000U, 2000000U, 1900000U, 1800000U,
+	1700000U, 1600000U, 1500000U, 1400000U, 1300000U,
+	1200000U, 1100000U,  900000U,  800000U,  725000U,
+};
+
+#define MTK_A76_SCALE_ENTRIES ARRAY_SIZE(mtk_a76_scale_khz)
+
+/*
+ * Replace the top A55 hardware LUT states before cpufreq enables the HW.
+ * Only the frequency field is changed; all other controller bits remain
+ * untouched.  Row 15 duplicates row 14 so the normal LUT reader terminates
+ * after exactly the 15 A76-compatible states.
+ */
+static int mtk_program_a55_a76_lut(struct cpufreq_mtk *c)
 {
-	unsigned long long num;
+	unsigned int i;
+	u32 raw;
 
-	if (hw_max <= hw_min)
-		return LOGICAL_MIN_KHZ;
-	if (hw_khz >= hw_max)
-		return LOGICAL_MAX_KHZ;
-	if (hw_khz <= hw_min)
-		return LOGICAL_MIN_KHZ;
+	if (!mtk_is_a55_domain(c))
+		return 0;
 
-	num = (unsigned long long)(hw_khz - hw_min) *
-		(LOGICAL_MAX_KHZ - LOGICAL_MIN_KHZ);
-	return LOGICAL_MIN_KHZ + div_u64(num, hw_max - hw_min);
-}
-
-static unsigned int __maybe_unused
-mtk_logical_to_a55_index(const struct cpufreq_mtk *c,
-						unsigned int target_khz)
-{
-	unsigned int i, best = 0;
-
-	/* Table is descending. Pick the first logical state <= target. */
-	for (i = 0; i < c->nr_opp; i++) {
-		if (c->table[i].frequency <= target_khz)
-			return i;
-		best = i;
+	for (i = 0; i < MTK_A76_SCALE_ENTRIES; i++) {
+		raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] +
+				i * LUT_ROW_SIZE);
+		raw = (raw & ~LUT_FREQ) |
+			FIELD_PREP(LUT_FREQ, mtk_a76_scale_khz[i] / 1000U);
+		writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE] +
+				i * LUT_ROW_SIZE);
 	}
-	return best;
+
+	raw = readl_relaxed(c->reg_bases[REG_FREQ_LUT_TABLE] +
+			MTK_A76_SCALE_ENTRIES * LUT_ROW_SIZE);
+	raw = (raw & ~LUT_FREQ) |
+		FIELD_PREP(LUT_FREQ, mtk_a76_scale_khz[MTK_A76_SCALE_ENTRIES - 1] / 1000U);
+	writel_relaxed(raw, c->reg_bases[REG_FREQ_LUT_TABLE] +
+			MTK_A76_SCALE_ENTRIES * LUT_ROW_SIZE);
+
+	return 0;
 }
 
 static int __maybe_unused
@@ -146,15 +157,11 @@ static int mtk_cpufreq_hw_target_index(struct cpufreq_policy *policy,
 					unsigned int index)
 {
 	struct cpufreq_mtk *c = policy->driver_data;
-	unsigned int hw_index = index;
-
 	if (index >= c->nr_opp)
 		return -EINVAL;
 
-	if (mtk_is_a55_domain(c))
-		hw_index = index;
-
-	writel_relaxed(hw_index, c->reg_bases[REG_FREQ_PERF_STATE]);
+	/* Logical index == hardware LUT index on both domains. */
+	writel_relaxed(index, c->reg_bases[REG_FREQ_PERF_STATE]);
 	return 0;
 }
 
@@ -268,12 +275,17 @@ static int mtk_cpu_create_freq_table(struct platform_device *pdev,
 	struct device *dev = &pdev->dev;
 	void __iomem *base_table = c->reg_bases[REG_FREQ_LUT_TABLE];
 	u32 data, i, freq, prev_freq = 0;
-	unsigned int hw_min, hw_max;
 
 	c->hw_table = devm_kcalloc(dev, LUT_MAX_ENTRIES + 1,
 				   sizeof(*c->hw_table), GFP_KERNEL);
 	if (!c->hw_table)
 		return -ENOMEM;
+
+	if (mtk_is_a55_domain(c)) {
+		int ret = mtk_program_a55_a76_lut(c);
+		if (ret)
+			return ret;
+	}
 
 	for (i = 0; i < LUT_MAX_ENTRIES; i++) {
 		data = readl_relaxed(base_table + i * LUT_ROW_SIZE);
@@ -299,12 +311,12 @@ static int mtk_cpu_create_freq_table(struct platform_device *pdev,
 			c->table[i].frequency = c->hw_table[i].frequency;
 		c->nr_opp = c->hw_nr_opp;
 	} else {
-		hw_max = c->hw_table[0].frequency;
-		hw_min = c->hw_table[c->hw_nr_opp - 1].frequency;
-		for (i = 0; i < c->hw_nr_opp; i++)
-			c->table[i].frequency = mtk_a55_to_logical(
-				c->hw_table[i].frequency, hw_min, hw_max);
-		c->nr_opp = c->hw_nr_opp;
+		/* A55 hardware LUT was replaced with the exact A76 15-state scale. */
+		if (c->hw_nr_opp != MTK_A76_SCALE_ENTRIES)
+			return -EINVAL;
+		for (i = 0; i < MTK_A76_SCALE_ENTRIES; i++)
+			c->table[i].frequency = mtk_a76_scale_khz[i];
+		c->nr_opp = MTK_A76_SCALE_ENTRIES;
 	}
 
 	c->table[c->nr_opp].frequency = CPUFREQ_TABLE_END;

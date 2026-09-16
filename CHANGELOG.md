@@ -1,4 +1,5 @@
 ## 1.3.1-3CLUSTER-POLICY-FINAL
+- Make CPU0-5 A55 frequency states real hardware LUT points matching the A76 2200-725 MHz table; remove the previous logical interpolation path.
 
 - Fix virtual CPU3-5 table initialization ordering.
 - Finalize the virtual Perf table only after native CPU6-7 resources are initialized.
